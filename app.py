@@ -317,6 +317,13 @@ def safe_list(value: Any) -> list[str]:
     return [text]
 
 
+def short(value: Any, limit: int = 24) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 1)] + "…"
+
+
 @st.cache_data(show_spinner=False)
 def load_data(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     base = Path(data_dir).expanduser()
