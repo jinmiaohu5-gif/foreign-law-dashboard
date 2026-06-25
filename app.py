@@ -129,7 +129,7 @@ def style() -> None:
             position: relative;
             z-index: 5;
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 8px;
             padding: 5px;
             border: 1px solid rgba(78,161,255,.25);
@@ -152,6 +152,11 @@ def style() -> None:
             color: #06100e !important;
             background: linear-gradient(135deg, {CYAN}, {GOLD});
             box-shadow: 0 0 30px rgba(34,245,208,.30);
+        }}
+        @media (max-width: 900px) {{
+            .nav-wrap {{
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }}
         }}
 
         .kpi {{
@@ -870,7 +875,7 @@ def main() -> None:
     with st.sidebar:
         st.markdown("### DATA SOURCE")
         data_dir = st.text_input("数据目录", str(DEFAULT_DATA_DIR))
-        st.markdown("三主按钮已放在页面顶部：可视化大屏 / 采集数据舱 / 法规条款检索。")
+        st.markdown("页面顶部提供四个入口：可视化大屏 / 采集数据舱 / 法规条款检索 / 智能问答。")
 
     try:
         meta, docs, articles = load_data(data_dir)
