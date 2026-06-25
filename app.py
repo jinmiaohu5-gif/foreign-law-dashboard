@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -256,6 +257,7 @@ def nav(active: str) -> None:
         ("screen", "可视化大屏"),
         ("data", "采集数据舱"),
         ("search", "法规条款检索"),
+        ("qa", "智能问答"),
     ]
     links = []
     for key, label in items:
@@ -271,8 +273,8 @@ def shell_header(active: str, meta: pd.DataFrame, articles: pd.DataFrame) -> Non
             <div class="topbar">
                 <div>
                     <div class="brand-kicker">FOREIGN LAW DATA ELEMENTS</div>
-                    <div class="brand-title">境外法规数据要素高级驾驶舱</div>
-                    <div class="brand-sub">多法域采集 · 条款级结构化 · 模型辅助主题与质量治理</div>
+                    <div class="brand-title">境外法规文本数据要素采集与智能分析系统</div>
+                    <div class="brand-sub">多法域采集 · 条款级结构化 · 模型辅助主题标注 · 检索式问答与质量治理</div>
                 </div>
                 <div></div>
                 <div class="status-pill">ONLINE · {len(meta):,} DOCS · {len(articles):,} ARTICLES</div>
@@ -336,6 +338,138 @@ def topics(docs: pd.DataFrame) -> pd.DataFrame:
         for x in xs:
             count[x] = count.get(x, 0) + 1
     return pd.DataFrame([{"topic": k, "count": v} for k, v in sorted(count.items(), key=lambda x: x[1], reverse=True)])
+
+
+def question_terms(text: str) -> list[str]:
+    text = (text or "").strip()
+    if not text:
+        return []
+    aliases = {
+        "隐私": ["隐私", "privacy", "personal information", "个人信息", "数据保护"],
+        "个人信息": ["个人信息", "personal information", "privacy", "data protection"],
+        "数据": ["数据", "data", "information"],
+        "金融": ["金融", "finance", "financial", "bank", "securities"],
+        "劳动": ["劳动", "就业", "employment", "labour", "labor", "worker"],
+        "环境": ["环境", "environment", "pollution", "waste"],
+        "贸易": ["贸易", "trade", "import", "export", "customs"],
+        "人工智能": ["人工智能", "AI", "artificial intelligence"],
+        "异常": ["异常", "anomaly", "格式错乱", "扫描", "layout"],
+        "日本": ["Japan", "日本"],
+        "美国": ["United States", "美国", "Federal Register"],
+        "英国": ["United Kingdom", "英国", "legislation.gov.uk"],
+        "新加坡": ["Singapore", "新加坡"],
+    }
+    terms: list[str] = []
+    for key, vals in aliases.items():
+        if key.lower() in text.lower():
+            terms.extend(vals)
+    terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text))
+    terms.extend(re.findall(r"[\u4e00-\u9fff]{2,}", text))
+    seen = set()
+    result = []
+    for term in terms:
+        low = term.lower()
+        if low not in seen:
+            seen.add(low)
+            result.append(term)
+    return result
+
+
+def row_text(row: pd.Series, cols: list[str]) -> str:
+    parts = []
+    for col in cols:
+        if col in row.index:
+            parts.append(str(row.get(col, "")))
+    return " ".join(parts).lower()
+
+
+def score_frame(df: pd.DataFrame, terms: list[str], cols: list[str], top_n: int = 10) -> pd.DataFrame:
+    if df.empty or not terms:
+        return df.head(0).copy()
+    scored = []
+    low_terms = [t.lower() for t in terms if t]
+    for idx, row in df.iterrows():
+        hay = row_text(row, cols)
+        score = sum(hay.count(term) * (2 if len(term) >= 4 else 1) for term in low_terms)
+        if score > 0:
+            scored.append((idx, score))
+    if not scored:
+        return df.head(0).copy()
+    scored = sorted(scored, key=lambda x: x[1], reverse=True)[:top_n]
+    result = df.loc[[idx for idx, _ in scored]].copy()
+    result.insert(0, "match_score", [score for _, score in scored])
+    return result
+
+
+def build_answer(question: str, terms: list[str], doc_hits: pd.DataFrame, article_hits: pd.DataFrame) -> str:
+    if not terms:
+        return "请输入更具体的问题，例如“有哪些关于隐私保护的法规？”或“日本劳动就业相关条款有哪些？”。"
+    if doc_hits.empty and article_hits.empty:
+        return "当前数据集中没有检索到明显相关的法规或条款。建议更换关键词，例如使用“privacy / personal information / 金融 / 劳动 / trade”等。"
+
+    jur_counts = Counter()
+    topic_counts = Counter()
+    if not doc_hits.empty and "jurisdiction" in doc_hits:
+        jur_counts.update(doc_hits["jurisdiction"].astype(str).tolist())
+    if not article_hits.empty and "jurisdiction" in article_hits:
+        jur_counts.update(article_hits["jurisdiction"].astype(str).tolist())
+    if not doc_hits.empty and "topic_list" in doc_hits:
+        for xs in doc_hits["topic_list"]:
+            topic_counts.update(xs)
+
+    top_jur = "、".join([f"{k}({v})" for k, v in jur_counts.most_common(3)]) or "多个法域"
+    top_topics = "、".join([k for k, _ in topic_counts.most_common(5)]) or "相关主题"
+    laws = []
+    if not doc_hits.empty:
+        for _, row in doc_hits.head(3).iterrows():
+            laws.append(f"《{short(row.get('law_title_original', ''), 36)}》")
+
+    law_text = "、".join(laws) if laws else "若干相关法规"
+    return (
+        f"根据当前结构化数据集，对问题“{question}”的检索结果显示：相关内容主要分布在 {top_jur}，"
+        f"主题上集中于 {top_topics}。系统优先命中的法规包括 {law_text}。"
+        f"下方列出了匹配度较高的法规文档和条款片段，可通过 source_url 回溯到原始公开来源。"
+    )
+
+
+def explain_clause(text: str, title: str = "", topic: str = "") -> str:
+    content = " ".join(str(text or "").split())
+    low = content.lower()
+    if not content:
+        return "请选择或输入一条条款内容。"
+
+    theme_rules = [
+        ("数据保护/隐私", ["privacy", "personal information", "个人信息", "data protection", "隐私"]),
+        ("金融监管", ["financial", "bank", "securities", "金融", "银行", "证券"]),
+        ("劳动就业", ["employment", "labour", "labor", "worker", "劳动", "雇员", "就业"]),
+        ("贸易合规", ["trade", "import", "export", "customs", "贸易", "进口", "出口"]),
+        ("环境保护", ["environment", "pollution", "waste", "环境", "污染"]),
+        ("行政程序/监管要求", ["shall", "must", "required", "prohibit", "不得", "应当", "必须", "禁止"]),
+    ]
+    themes = [name for name, keys in theme_rules if any(k.lower() in low for k in keys)]
+    if not themes and topic:
+        themes = safe_list(topic)
+    if not themes:
+        themes = ["一般法规义务或程序性规定"]
+
+    duty = []
+    if any(k in low for k in ["shall", "must", "required", "应当", "必须", "须"]):
+        duty.append("该条款包含较明显的义务性要求。")
+    if any(k in low for k in ["may", "可以", "得"]):
+        duty.append("该条款可能包含授权性或允许性安排。")
+    if any(k in low for k in ["prohibit", "not ", "不得", "禁止"]):
+        duty.append("该条款可能包含禁止性或限制性要求。")
+    if not duty:
+        duty.append("该条款主要提供定义、适用范围或一般规则说明。")
+
+    return (
+        f"【条款辅助解释】\n"
+        f"所属法规：{title or '未指定'}\n"
+        f"可能主题：{'、'.join(themes[:4])}\n"
+        f"解释：该条款围绕上述主题展开，建议重点关注适用对象、行为要求、限制条件和责任后果。"
+        f"{''.join(duty)}\n"
+        f"提示：本解释由关键词和结构化字段自动生成，仅用于辅助理解和检索，不构成正式法律意见。"
+    )
 
 
 def missings(docs: pd.DataFrame) -> pd.DataFrame:
@@ -631,6 +765,105 @@ def page_search(docs: pd.DataFrame, articles: pd.DataFrame) -> None:
     st.dataframe(ar[[c for c in acols if c in ar]].head(800), use_container_width=True, height=400)
 
 
+def page_qa(docs: pd.DataFrame, articles: pd.DataFrame) -> None:
+    st.markdown("### 智能问答与条款解释")
+    st.markdown(
+        """
+        <div class="subtle">
+        本页不调用外部大模型，采用结构化数据检索、关键词扩展和规则模板生成回答。答案可追溯到法规文档和条款来源，适合演示“法规问答”和“条款辅助解释”能力。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    suggestions = [
+        "有哪些关于隐私保护的法规和条款？",
+        "日本劳动就业相关法规有哪些？",
+        "美国联邦公报中有哪些金融监管相关内容？",
+        "哪些文本存在异常质量问题？",
+        "贸易合规相关条款有哪些？",
+    ]
+    c1, c2 = st.columns([0.62, 0.38])
+    with c1:
+        question = st.text_input("输入问题", value=st.session_state.get("qa_question", suggestions[0]))
+    with c2:
+        picked = st.selectbox("推荐问题", suggestions)
+        if st.button("使用推荐问题", use_container_width=True):
+            st.session_state["qa_question"] = picked
+            st.rerun()
+
+    terms = question_terms(question)
+    doc_hits = score_frame(
+        docs,
+        terms,
+        ["law_title_original", "law_number", "summary_zh", "topic_tags_final", "related_laws", "jurisdiction", "source_name"],
+        top_n=12,
+    )
+    article_hits = score_frame(
+        articles,
+        terms,
+        ["law_title_original", "law_number", "chapter_title", "article_title", "article_content", "topic_tags_final", "jurisdiction"],
+        top_n=18,
+    )
+
+    st.markdown("#### 检索式回答")
+    answer = build_answer(question, terms, doc_hits, article_hits)
+    st.info(answer)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("扩展关键词", len(terms))
+    c2.metric("命中文档", len(doc_hits))
+    c3.metric("命中条款", len(article_hits))
+    if terms:
+        st.caption("关键词：" + "、".join(terms[:18]))
+
+    left, right = st.columns([0.45, 0.55])
+    with left:
+        st.markdown("#### 相关法规")
+        doc_cols = [
+            "match_score",
+            "jurisdiction",
+            "law_title_original",
+            "law_number",
+            "publish_date",
+            "topic_tags_final",
+            "source_url",
+        ]
+        st.dataframe(doc_hits[[c for c in doc_cols if c in doc_hits]].head(12), use_container_width=True, height=360)
+    with right:
+        st.markdown("#### 相关条款")
+        art_cols = [
+            "match_score",
+            "jurisdiction",
+            "law_title_original",
+            "chapter_title",
+            "article_title",
+            "article_content",
+            "source_url",
+        ]
+        st.dataframe(article_hits[[c for c in art_cols if c in article_hits]].head(18), use_container_width=True, height=360)
+
+    st.markdown("### 条款解释")
+    if not article_hits.empty:
+        options = {
+            f"{short(row.get('law_title_original'), 34)} | {short(row.get('article_title'), 14)} | score {row.get('match_score')}": idx
+            for idx, row in article_hits.head(20).iterrows()
+        }
+        selected = st.selectbox("从命中条款中选择一条", list(options.keys()))
+        row = article_hits.loc[options[selected]]
+        default_clause = row.get("article_content", "")
+        default_title = row.get("law_title_original", "")
+        default_topic = row.get("topic_tags_final", "")
+    else:
+        default_clause = ""
+        default_title = ""
+        default_topic = ""
+
+    clause_text = st.text_area("条款内容", value=default_clause, height=150)
+    explain = explain_clause(clause_text, default_title, default_topic)
+    st.code(explain, language="text")
+
+
 def main() -> None:
     style()
     with st.sidebar:
@@ -645,15 +878,17 @@ def main() -> None:
         return
 
     active = get_query_page()
-    if active not in {"screen", "data", "search"}:
+    if active not in {"screen", "data", "search", "qa"}:
         active = "screen"
     shell_header(active, meta, articles)
     if active == "screen":
         page_screen(meta, docs, articles)
     elif active == "data":
         page_data(meta, docs)
-    else:
+    elif active == "search":
         page_search(docs, articles)
+    else:
+        page_qa(docs, articles)
     close_shell()
 
 
