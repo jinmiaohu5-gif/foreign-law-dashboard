@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import html
 import json
 import re
 from collections import Counter
@@ -16,6 +17,13 @@ DEFAULT_DATA_DIR = Path("data")
 META_FILE = "境外法规基础信息_增量多法域_最终可提交版.csv"
 DOC_FILE = "结构化提取结果_文档级_含模型.jsonl"
 ARTICLE_FILE = "结构化提取结果_条款级_含模型.csv"
+FULL_ARTICLE_COUNT = 67669
+SOURCE_HOME_URLS = {
+    "Japan e-Gov Law API": "https://laws.e-gov.go.jp/",
+    "Federal Register API": "https://www.federalregister.gov/",
+    "Singapore Statutes Online": "https://sso.agc.gov.sg/",
+    "legislation.gov.uk": "https://www.legislation.gov.uk/",
+}
 
 CYAN = "#22f5d0"
 BLUE = "#4ea1ff"
@@ -166,7 +174,11 @@ def style() -> None:
             background: linear-gradient(180deg, rgba(12,28,43,.88), rgba(8,14,22,.92));
             padding: 13px 14px;
             position: relative;
-            overflow: hidden;
+            overflow: visible;
+            z-index: 2;
+        }}
+        .kpi:hover {{
+            z-index: 30;
         }}
         .kpi:after {{
             content: "";
@@ -187,11 +199,50 @@ def style() -> None:
             color: #ffffff;
             font-size: 28px;
             font-weight: 800;
+            width: fit-content;
+        }}
+        .kpi-value a {{
+            color: #ffffff !important;
+            text-decoration: none !important;
+            border-bottom: 1px dashed rgba(34,245,208,.75);
         }}
         .kpi-note {{
             color: {CYAN};
             font-size: 12px;
             margin-top: 3px;
+        }}
+        .kpi-popover {{
+            display: none;
+            position: absolute;
+            left: 12px;
+            top: 76px;
+            min-width: 230px;
+            max-width: 360px;
+            padding: 10px 12px;
+            border: 1px solid rgba(34,245,208,.45);
+            border-radius: 8px;
+            background: rgba(3,10,18,.97);
+            box-shadow: 0 18px 45px rgba(0,0,0,.55), 0 0 22px rgba(34,245,208,.12);
+            color: #f3fbff;
+            font-size: 12px;
+            line-height: 1.55;
+        }}
+        .kpi:hover .kpi-popover {{
+            display: block;
+        }}
+        .kpi-popover-title {{
+            color: {CYAN};
+            font-weight: 800;
+            margin-bottom: 4px;
+        }}
+        .kpi-popover a {{
+            display: block;
+            color: #dffcff !important;
+            text-decoration: none !important;
+            padding: 2px 0;
+        }}
+        .kpi-popover a:hover {{
+            color: {GOLD} !important;
         }}
 
         .card {{
@@ -214,6 +265,35 @@ def style() -> None:
             color: {MUTED};
             font-size: 13px;
             line-height: 1.45;
+        }}
+        .qa-answer {{
+            border: 1px solid rgba(34,245,208,.35);
+            border-radius: 8px;
+            padding: 16px 18px;
+            margin: 8px 0 16px 0;
+            color: #f8fdff;
+            font-size: 16px;
+            line-height: 1.72;
+            background: linear-gradient(135deg, rgba(13,38,58,.94), rgba(4,16,28,.96));
+            box-shadow: inset 0 0 24px rgba(34,245,208,.08), 0 14px 35px rgba(0,0,0,.22);
+        }}
+        .qa-stat {{
+            border: 1px solid rgba(78,161,255,.25);
+            border-radius: 8px;
+            padding: 12px 14px;
+            background: rgba(8,20,34,.78);
+        }}
+        .qa-stat-label {{
+            color: {CYAN};
+            font-size: 13px;
+            font-weight: 700;
+        }}
+        .qa-stat-value {{
+            color: #ffffff;
+            font-family: "JetBrains Mono", monospace;
+            font-size: 28px;
+            font-weight: 800;
+            margin-top: 4px;
         }}
         .custom-legend {{
             display: flex;
@@ -317,6 +397,10 @@ def safe_list(value: Any) -> list[str]:
     return [text]
 
 
+def esc(value: Any) -> str:
+    return html.escape(str(value or ""), quote=True)
+
+
 def short(value: Any, limit: int = 24) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
@@ -351,6 +435,30 @@ def topics(docs: pd.DataFrame) -> pd.DataFrame:
         for x in xs:
             count[x] = count.get(x, 0) + 1
     return pd.DataFrame([{"topic": k, "count": v} for k, v in sorted(count.items(), key=lambda x: x[1], reverse=True)])
+
+
+def source_links_html(meta: pd.DataFrame) -> str:
+    names = sorted(meta["source_name"].astype(str).replace("", "未知来源").unique().tolist())
+    links = []
+    for name in names:
+        url = SOURCE_HOME_URLS.get(name)
+        if not url:
+            subset = meta.loc[meta["source_name"].astype(str) == name, "source_url"] if "source_url" in meta else pd.Series([], dtype=str)
+            url = str(subset.iloc[0]) if not subset.empty else "#"
+        links.append(f'<a href="{esc(url)}" target="_blank" rel="noopener noreferrer">{esc(name)}</a>')
+    return "".join(links)
+
+
+def qa_stat(label: str, value: int) -> None:
+    st.markdown(
+        f"""
+        <div class="qa-stat">
+            <div class="qa-stat-label">{esc(label)}</div>
+            <div class="qa-stat-value">{value:,}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def question_terms(text: str) -> list[str]:
@@ -608,13 +716,16 @@ def color_key(df: pd.DataFrame, label: str, value: str, colors: list[str] | None
     st.markdown('<div class="custom-legend">' + "".join(items) + "</div>", unsafe_allow_html=True)
 
 
-def kpi(label: str, value: str, note: str) -> None:
+def kpi(label: str, value: str, note: str, popover: str = "", href: str = "") -> None:
+    value_html = f'<a href="{esc(href)}" target="_self">{esc(value)}</a>' if href else esc(value)
+    popover_html = f'<div class="kpi-popover">{popover}</div>' if popover else ""
     st.markdown(
         f"""
         <div class="kpi">
-            <div class="kpi-label">{label}</div>
-            <div class="kpi-value">{value}</div>
-            <div class="kpi-note">{note}</div>
+            <div class="kpi-label">{esc(label)}</div>
+            <div class="kpi-value">{value_html}</div>
+            <div class="kpi-note">{esc(note)}</div>
+            {popover_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -631,17 +742,54 @@ def card_end() -> None:
 
 def page_screen(meta: pd.DataFrame, docs: pd.DataFrame, articles: pd.DataFrame) -> None:
     row = st.columns(6)
+    juris = sorted(meta["jurisdiction"].astype(str).replace("", "未知法域").unique().tolist())
+    juris_popover = (
+        '<div class="kpi-popover-title">覆盖法域</div>'
+        + "<br>".join(esc(x) for x in juris)
+    )
+    article_popover = (
+        '<div class="kpi-popover-title">条款级记录说明</div>'
+        f"当前网页为保持在线演示流畅，仅加载 {len(articles):,} 条条款级记录；"
+        f"项目完整结构化条款数据共 {FULL_ARTICLE_COUNT:,} 条。"
+    )
+    source_popover = '<div class="kpi-popover-title">公开来源链接</div>' + source_links_html(meta)
+    anomaly_count = int((docs.get("anomaly_label", "") == "anomaly").sum())
+    anomaly_popover = (
+        '<div class="kpi-popover-title">异常文本</div>'
+        "点击数字可在本页下方展开异常文本明细表。"
+    )
     vals = [
-        ("DOCS", f"{len(meta):,}", "文档级文本"),
-        ("ARTICLES", f"{len(articles):,}", "条款级记录"),
-        ("JURIS", f"{meta['jurisdiction'].nunique():,}", "覆盖法域"),
-        ("SOURCES", f"{meta['source_name'].nunique():,}", "公开来源"),
-        ("PARSE OK", f"{(meta['parse_status']=='ok').mean()*100:.1f}%", "解析成功率"),
-        ("ANOMALY", f"{(docs.get('anomaly_label','')=='anomaly').sum():,}", "异常文本"),
+        ("DOCS", f"{len(meta):,}", "文档级文本", "", ""),
+        ("ARTICLES", f"{len(articles):,}", "条款级记录", article_popover, ""),
+        ("JURIS", f"{len(juris):,}", "覆盖法域", juris_popover, ""),
+        ("SOURCES", f"{meta['source_name'].nunique():,}", "公开来源", source_popover, ""),
+        ("PARSE OK", f"{(meta['parse_status']=='ok').mean()*100:.1f}%", "解析成功率", "", ""),
+        ("ANOMALY", f"{anomaly_count:,}", "异常文本", anomaly_popover, "?page=screen&panel=anomaly"),
     ]
     for col, item in zip(row, vals):
         with col:
             kpi(*item)
+
+    panel = st.query_params.get("panel", "")
+    if isinstance(panel, list):
+        panel = panel[0]
+    if panel == "anomaly":
+        st.markdown("### 异常文本明细")
+        anomaly_df = docs[docs.get("anomaly_label", "") == "anomaly"].copy()
+        anomaly_cols = [
+            "jurisdiction",
+            "law_title_original",
+            "law_number",
+            "document_category_zh",
+            "missing_fields",
+            "anomaly_label",
+            "anomaly_score",
+            "scan_or_layout_flag",
+            "scan_or_layout_reason",
+            "source_url",
+        ]
+        st.caption(f"当前共 {len(anomaly_df):,} 条异常文本记录。")
+        st.dataframe(anomaly_df[[c for c in anomaly_cols if c in anomaly_df]].head(200), use_container_width=True, height=280)
 
     r1 = st.columns([0.30, 0.28, 0.22, 0.20])
     with r1[0]:
@@ -695,7 +843,7 @@ def page_screen(meta: pd.DataFrame, docs: pd.DataFrame, articles: pd.DataFrame) 
             st.plotly_chart(fig_base(fig, 250), use_container_width=True, config=PLOTLY_CONFIG)
         card_end()
     with r2[1]:
-        card_start("06 · 实时样例流")
+        card_start("06 · 样例流")
         cols = ["jurisdiction", "law_title_original", "law_number", "publish_date", "source_name"]
         st.dataframe(meta[cols].head(8), use_container_width=True, height=250)
         card_end()
@@ -819,14 +967,17 @@ def page_qa(docs: pd.DataFrame, articles: pd.DataFrame) -> None:
         top_n=18,
     )
 
-    st.markdown("#### 检索式回答")
+    st.markdown("#### 回答结果")
     answer = build_answer(question, terms, doc_hits, article_hits)
-    st.info(answer)
+    st.markdown(f'<div class="qa-answer">{esc(answer)}</div>', unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("扩展关键词", len(terms))
-    c2.metric("命中文档", len(doc_hits))
-    c3.metric("命中条款", len(article_hits))
+    with c1:
+        qa_stat("扩展关键词", len(terms))
+    with c2:
+        qa_stat("命中文档", len(doc_hits))
+    with c3:
+        qa_stat("命中条款", len(article_hits))
     if terms:
         st.caption("关键词：" + "、".join(terms[:18]))
 
